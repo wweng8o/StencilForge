@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Pre-release tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libegl1 libgl1 libopengl0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+
+      - name: Unit tests + CLI tests (fast)
+        run: |
+          pytest tests/python/ -m "not integration" -q --cov=src/stencilforge --cov-report=term --cov-report=xml
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui-vue/package-lock.json
+
+      - name: Install frontend deps
+        run: npm ci
+        working-directory: ui-vue
+
+      - name: i18n key consistency check
+        run: npm run check:i18n
+        working-directory: ui-vue
+
+      - name: Vitest component + logic tests
+        run: npx vitest run
+        working-directory: ui-vue
+
+      - name: Vite production build
+        run: npm run build
+        working-directory: ui-vue
+
+  release:
+    name: Build and release
+    needs: test
+    runs-on: windows-latest
+    env:
+      MSIX_IDENTITY_NAME: ${{ vars.MSIX_IDENTITY_NAME }}
+      MSIX_IDENTITY_PUBLISHER: ${{ vars.MSIX_IDENTITY_PUBLISHER }}
+      MSIX_PUBLISHER_DISPLAY_NAME: ${{ vars.MSIX_PUBLISHER_DISPLAY_NAME }}
+      MSIX_PACKAGE_FAMILY_NAME: ${{ vars.MSIX_PACKAGE_FAMILY_NAME }}
+      MSIX_PACKAGE_SID: ${{ vars.MSIX_PACKAGE_SID }}
+      MSIX_STORE_ID: ${{ vars.MSIX_STORE_ID }}
+      MSIX_STORE_DEEP_LINK: ${{ vars.MSIX_STORE_DEEP_LINK }}
+      MSIX_STORE_WEB_URL: ${{ vars.MSIX_STORE_WEB_URL }}
+      MSIX_SIGN_CERT_BASE64: ${{ secrets.MSIX_SIGN_CERT_BASE64 }}
+      MSIX_SIGN_CERT_PASSWORD: ${{ secrets.MSIX_SIGN_CERT_PASSWORD }}
+      MSIX_SIGN_TIMESTAMP_URL: ${{ vars.MSIX_SIGN_TIMESTAMP_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install Pillow
+
+      - name: Build app (onedir)
+        run: .\scripts\build_windows.ps1
+
+      - name: Install Windows SDK (MakeAppx)
+        run: |
+          winget source reset --force
+          winget source update
+          winget install --id Microsoft.WindowsSDK.10.0.18362 --source winget --silent --accept-package-agreements --accept-source-agreements
+
+      - name: Add MakeAppx to PATH
+        run: |
+          $sdkBin = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter makeappx.exe |
+            Where-Object { $_.FullName -match "\\x64\\makeappx.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $sdkBin) { throw "makeappx.exe not found after SDK install" }
+          Add-Content $env:GITHUB_PATH (Split-Path $sdkBin.FullName)
+
+      - name: Build MSIX package
+        run: .\scripts\build_msix.ps1 -Version ${{ github.ref_name }}
+
+      - name: Verify MSIX is unsigned (non-installable by default)
+        if: ${{ env.MSIX_SIGN_CERT_BASE64 == '' }}
+        shell: pwsh
+        run: |
+          $msix = Get-ChildItem "dist-msix\*.msix" | Select-Object -First 1
+          if (-not $msix) { throw "No MSIX file found in dist-msix." }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($msix.FullName)
+          try {
+            $signature = $zip.Entries | Where-Object { $_.FullName -eq "AppxSignature.p7x" }
+            if ($signature) {
+              throw "MSIX is signed. This pipeline requires unsigned MSIX so it is not installable by default."
+            }
+          }
+          finally {
+            $zip.Dispose()
+          }
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist-msix/*.msix

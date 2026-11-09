@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+from math import isfinite
+
+from stencilforge.aperture_workspace import (
+    _get_pad_size_metric,
+    _match_specificity,
+    _parse_pad_size,
+    _rule_matches_workspace,
+    compute_aperture_workspace,
+    default_aperture_workspace,
+    describe_action,
+    describe_match,
+    export_aperture_workspace_payload,
+    import_aperture_workspace_payload,
+    normalize_aperture_workspace,
+    resolve_aperture_workspace_effect,
+    validate_aperture_workspace_payload,
+)
+
+
+def test_default_workspace_has_selected_rule():
+    workspace = normalize_aperture_workspace({})
+
+    assert workspace["profileName"] == "Balanced default"
+    assert workspace["packageType"] == "Any"
+    assert workspace["selectedRuleId"] == "rule_default"
+    assert len(workspace["rules"]) >= 1
+
+
+def test_workspace_metrics_are_computed():
+    snapshot = compute_aperture_workspace({}, 0.12, locale="en")
+
+    assert snapshot["thicknessLabel"] == "0.12 mm"
+    assert snapshot["calculatorStatus"] == "ok"
+    assert snapshot["previewStatus"] == "below"
+    assert isfinite(snapshot["recommendedVolumeMm3"])
+    assert snapshot["generatedRulePreview"].startswith("match: { package:")
+    assert snapshot["matchedRuleGroupSummary"] == "Any"
+    assert len(snapshot["ruleGroups"]) == 6
+
+
+def test_workspace_rule_groups_are_usable_for_filtering():
+    snapshot = compute_aperture_workspace(default_aperture_workspace(), 0.12)
+    group_map = {group["key"]: group for group in snapshot["ruleGroups"]}
+
+    assert group_map["qfn::smd"]["label"] == "QFN / SMD"
+    assert group_map["qfn::smd"]["ruleCount"] == 2
+    assert group_map["qfn::smd"]["enabledRuleCount"] == 2
+    assert group_map["any::any"]["ruleCount"] == 1
+
+
+def test_workspace_descriptions_are_human_readable():
+    workspace = default_aperture_workspace()
+    rule = workspace["rules"][1]
+
+    match_text = describe_match(rule, locale="en")
+    assert "QFN" in match_text
+    assert "SMD" in match_text
+    assert "Top" not in match_text
+    assert "0.20-0.60 mm" in match_text
+    assert describe_action(rule, locale="en") == "Delta -0.015 mm"
+
+
+def test_default_workspace_uses_neutral_fallback():
+    effect = resolve_aperture_workspace_effect(default_aperture_workspace(), 0.12)
+
+    assert effect["ruleId"] == "rule_default"
+    assert effect["effect"] == {"enabled": True, "mode": "scale", "deltaMm": 0.0, "scale": 1.0}
+
+
+def test_workspace_effect_prefers_package_and_pad_type_match():
+    workspace = default_aperture_workspace()
+    workspace["selectedRuleId"] = "rule_default"
+    workspace["packageType"] = "QFN"
+    workspace["padType"] = "SMD"
+
+    effect = resolve_aperture_workspace_effect(workspace, 0.15)
+
+    assert effect["ruleId"] == "rule_qfn"
+    assert effect["ruleName"] == "QFN fine pitch"
+    assert effect["groupSummary"] == "QFN / SMD"
+    assert effect["matchSummary"].startswith("QFN")
+    assert effect["effect"]["mode"] == "delta"
+    assert effect["effect"]["deltaMm"] == -0.015
+
+
+def test_workspace_any_package_does_not_match_specific_package_rule():
+    workspace = default_aperture_workspace()
+    workspace["packageType"] = "Any"
+    workspace["padType"] = "SMD"
+    workspace["padWidthMm"] = 0.45
+    workspace["padHeightMm"] = 0.4
+
+    effect = resolve_aperture_workspace_effect(workspace, 0.15)
+
+    assert effect["ruleId"] == "rule_default"
+
+
+def test_workspace_payload_round_trip_keeps_rules():
+    workspace = default_aperture_workspace()
+    workspace["profileName"] = "Import / Export"
+    workspace["rules"][1]["name"] = "Round trip rule"
+    workspace["selectedRuleGroupKey"] = "qfn::smd"
+
+    payload = export_aperture_workspace_payload(workspace, 0.15, locale="en")
+
+    assert payload["schemaVersion"] == 1
+    assert payload["kind"] == "stencilforge.aperture_workspace"
+    assert payload["workspace"]["profileName"] == "Import / Export"
+    assert payload["workspace"]["selectedRuleGroupKey"] == "qfn::smd"
+    assert payload["snapshot"]["thicknessValue"] == 0.15
+    assert payload["snapshot"]["matchedRuleGroupSummary"] == "Any"
+
+    imported = import_aperture_workspace_payload(payload)
+
+    assert imported["profileName"] == "Import / Export"
+    assert imported["rules"][1]["name"] == "Round trip rule"
+    assert imported["selectedRuleId"] == workspace["selectedRuleId"]
+    assert imported["selectedRuleGroupKey"] == "qfn::smd"
+
+
+def test_workspace_payload_accepts_legacy_field_aliases():
+    payload = {
+        "kind": "stencilforge.aperture_workspace",
+        "schemaVersion": 1,
+        "workspace": {
+            "profile_name": "Legacy profile",
+            "transfer_ratio": 0.91,
+            "selected_rule_id": "rule_legacy",
+            "rules": [
+                {
+                    "rule_id": "rule_legacy",
+                    "rule_name": "Legacy rule",
+                    "is_enabled": True,
+                    "rank": 12,
+                    "match": {
+                        "package_type": "QFN",
+                        "pad_type": "SMD",
+                        "layer": "Top",
+                        "pad_size_mm": "0.30-0.60 mm",
+                    },
+                    "action": {
+                        "actionMode": "scale",
+                        "scale_factor": 0.97,
+                        "delta_mm": -0.04,
+                    },
+                    "description": "Legacy note",
+                    "unexpected": "ignored",
+                }
+            ],
+        },
+    }
+
+    validation = validate_aperture_workspace_payload(payload)
+    workspace = validation["workspace"]
+
+    assert validation["ok"] is True
+    assert workspace["profileName"] == "Legacy profile"
+    assert workspace["transferRatio"] == 0.91
+    assert workspace["selectedRuleId"] == "rule_legacy"
+    assert workspace["rules"][0]["id"] == "rule_legacy"
+    assert workspace["rules"][0]["name"] == "Legacy rule"
+    assert workspace["rules"][0]["priority"] == 12
+    assert workspace["rules"][0]["match"]["package"] == "QFN"
+    assert workspace["rules"][0]["match"]["padType"] == "SMD"
+    assert "layer" not in workspace["rules"][0]["match"]
+    assert workspace["rules"][0]["action"]["mode"] == "scale"
+    assert workspace["rules"][0]["action"]["scale"] == 0.97
+
+
+def test_workspace_payload_rejects_unsupported_schema_version():
+    validation = validate_aperture_workspace_payload(
+        {
+            "kind": "stencilforge.aperture_workspace",
+            "schemaVersion": 99,
+            "workspace": default_aperture_workspace(),
+        },
+        locale="en",
+    )
+
+    assert validation["ok"] is False
+    assert any("unsupported schemaVersion" in issue for issue in validation["issues"])
+
+
+def test_pad_size_parses_correctly():
+    assert _parse_pad_size("0.20-0.60 mm") == (0.20, 0.60)
+    assert _parse_pad_size("") is None
+    assert _parse_pad_size("0.20-1.00 mm") == (0.20, 1.00)
+    assert _parse_pad_size(None) is None
+    assert _parse_pad_size("invalid") is None
+
+
+def test_pad_size_metric_uses_min_dimension():
+    assert _get_pad_size_metric(0.45, 0.4) == 0.4
+    assert _get_pad_size_metric(0.5, 0.5) == 0.5
+    assert _get_pad_size_metric(0, 0.4) == 0.0
+
+
+def test_pad_size_matching_empty_matches_any():
+    match = {"package": "Any", "padType": "Any", "padSize": ""}
+    assert _rule_matches_workspace(match, "QFN", "SMD", 0.45, 0.4)
+
+
+def test_pad_size_matching_in_range_succeeds():
+    match = {"package": "QFN", "padType": "SMD", "padSize": "0.20-0.60 mm"}
+    assert _rule_matches_workspace(match, "QFN", "SMD", 0.45, 0.4)
+
+
+def test_pad_size_matching_out_of_range_fails():
+    match = {"package": "QFN", "padType": "SMD", "padSize": "0.20-0.30 mm"}
+    assert not _rule_matches_workspace(match, "QFN", "SMD", 0.45, 0.4)
+
+
+def test_pad_size_contributes_to_specificity():
+    assert _match_specificity({"package": "Any", "padType": "Any", "padSize": ""}) == 0
+    assert _match_specificity({"package": "QFN", "padType": "Any", "padSize": ""}) == 1
+    assert _match_specificity({"package": "QFN", "padType": "SMD", "padSize": ""}) == 2
+    assert _match_specificity({"package": "QFN", "padType": "SMD", "padSize": "0.20-0.60 mm"}) == 3
+
+
+def test_pad_size_breaks_tie_in_matching():
+    workspace = default_aperture_workspace()
+    workspace["packageType"] = "QFN"
+    workspace["padType"] = "SMD"
+    workspace["padWidthMm"] = 0.45
+    workspace["padHeightMm"] = 0.4
+    workspace["rules"] = [
+        {
+            "id": "rule_fine", "name": "Fine pitch", "enabled": True, "priority": 80,
+            "match": {"package": "QFN", "padType": "SMD", "padSize": "0.20-0.60 mm"},
+            "action": {"mode": "delta", "deltaMm": -0.015, "scale": 0.98},
+        },
+        {
+            "id": "rule_standard", "name": "Standard", "enabled": True, "priority": 80,
+            "match": {"package": "QFN", "padType": "SMD", "padSize": "0.60-1.00 mm"},
+            "action": {"mode": "delta", "deltaMm": -0.01, "scale": 0.99},
+        },
+    ]
+    effect = resolve_aperture_workspace_effect(workspace, 0.15)
+    assert effect["ruleId"] == "rule_fine"
+
+
+def test_preview_status_includes_below():
+    workspace = default_aperture_workspace()
+    workspace["targetVolumeMm3"] = 0.001
+    snapshot = compute_aperture_workspace(workspace, 0.12)
+    assert snapshot["previewStatus"] == "below"
+
+
+def test_preview_status_shows_above_when_target_exceeds_recommended():
+    workspace = default_aperture_workspace()
+    workspace["targetVolumeMm3"] = 10.0
+    snapshot = compute_aperture_workspace(workspace, 0.12)
+    assert snapshot["previewStatus"] == "above"
+
+
+def test_preview_status_shows_recommended_when_target_matches_recommended():
+    snapshot = compute_aperture_workspace({}, 0.12)
+    workspace = default_aperture_workspace()
+    workspace["targetVolumeMm3"] = snapshot["recommendedVolumeMm3"]
+    snapshot2 = compute_aperture_workspace(workspace, 0.12)
+    assert snapshot2["previewStatus"] == "recommended"
+
+
+def test_default_workspace_has_expanded_rules():
+    workspace = default_aperture_workspace()
+    rule_ids = [r["id"] for r in workspace["rules"]]
+    assert len(workspace["rules"]) == 7
+    assert "rule_qfn_std" in rule_ids
+    assert "rule_bga" in rule_ids
+    assert "rule_ic" in rule_ids
+    assert "rule_tht" in rule_ids
+
+
+def test_tht_rule_matches_workspace():
+    workspace = default_aperture_workspace()
+    workspace["packageType"] = "IC"
+    workspace["padType"] = "THT"
+    workspace["padWidthMm"] = 1.2
+    workspace["padHeightMm"] = 1.2
+    effect = resolve_aperture_workspace_effect(workspace, 0.15)
+    assert effect["ruleId"] == "rule_tht"
+    assert effect["effect"]["mode"] == "scale"
+    assert effect["effect"]["scale"] == 1.04
+
+
+def test_bga_rule_matches_workspace():
+    workspace = default_aperture_workspace()
+    workspace["packageType"] = "BGA"
+    workspace["padType"] = "BGA"
+    workspace["padWidthMm"] = 0.4
+    workspace["padHeightMm"] = 0.4
+    effect = resolve_aperture_workspace_effect(workspace, 0.15)
+    assert effect["ruleId"] == "rule_bga"
+    assert effect["effect"]["mode"] == "scale"
+    assert effect["effect"]["scale"] == 0.96
+
+
+def test_bga_pad_type_is_preserved_and_factored():
+    workspace = normalize_aperture_workspace({"packageType": "BGA", "padType": "BGA"})
+    snapshot = compute_aperture_workspace(workspace, 0.12)
+
+    assert workspace["padType"] == "BGA"
+    assert snapshot["padTypeFactor"] == 0.92

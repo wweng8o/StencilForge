@@ -1,0 +1,53 @@
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.log
+
+# IDE
+.idea/
+.vscode/
+.venv/
+.where/
+.where-history.json
+AGENTS.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Frontend
+ui-vue/node_modules/
+ui-vue/dist/
+
+# Common build outputs (optional)
+dist/
+build/
+out/
+dist-msix/
+debug-dumps/
+
+# Generated stencil outputs
+stencil.stl
+stencil_debug_*.svg
+gko_outline.gko
+gko_outline_raw.png
+dist-installer/
+build-logs/
+
+# AI assistant
+.claude/
+.where-agent-progress.md
+
+# Test artifacts
+tests/artifacts/
+.coverage
+
+# Generated stencil output
+output/
+
+StencilForge_项目与实现思路整理.txt

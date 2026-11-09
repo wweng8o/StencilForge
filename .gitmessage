@@ -1,0 +1,36 @@
+# Conventional Commits / 约定式提交
+#
+# Subject / 标题:
+#   <type>(optional scope): <subject>
+#
+# Recommendation / 建议:
+# - Keep the subject in English for tool compatibility.
+# - Add a short Chinese summary in the body.
+#
+# Types / 常见类型:
+#   feat     - feature / 新功能
+#   fix      - bug fix / 修复缺陷
+#   chore    - maintenance / 维护
+#   docs     - documentation / 文档
+#   refactor - refactor / 重构
+#   test     - tests / 测试
+#   ci       - CI / 持续集成
+#
+# Examples / 示例:
+#   feat: add export endpoint
+#   chore: bump dependencies
+#
+# Body / 正文:
+# English summary:
+# - ...
+#
+# 中文摘要：
+# - ...
+
+<type>(optional scope): <subject>
+
+English summary:
+- ...
+
+中文摘要：
+- ...
