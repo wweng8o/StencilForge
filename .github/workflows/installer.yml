@@ -1,0 +1,68 @@
+name: Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g. v0.5.1)"
+        required: true
+        default: "v0.5.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    name: Build Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui-vue/package-lock.json
+
+      - name: Build UI
+        working-directory: ui-vue
+        run: |
+          npm ci
+          npm run build
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Build app (onedir)
+        run: python -m PyInstaller --noconfirm packaging\StencilForge.spec
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) { throw "ISCC.exe not found at $iscc" }
+          & $iscc "packaging\installer.iss"
+          if (!(Test-Path "dist-installer\StencilForge-Setup.exe")) { throw "Installer was not produced" }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StencilForge-Setup
+          path: dist-installer/StencilForge-Setup.exe
+
+      - name: Attach installer to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version }}
+          name: StencilForge ${{ inputs.version }}
+          generate_release_notes: true
+          files: dist-installer/StencilForge-Setup.exe
